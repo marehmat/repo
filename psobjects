@@ -24,3 +24,16 @@ $employeeData | Export-Csv -Path "C:\Reports\EmployeeData.csv" -NoTypeInformatio
 
 # If you want to include type info or use a different delimiter (e.g., semicolon for some regions)
 # $employeeData | Export-Csv -Path "C:\Reports\EmployeeData.csv" -Delimiter ';' -Encoding UTF8
+
+
+
+
+
+
+
+$employeeData = New-Object System.Collections.ArrayList
+foreach ($emp in $employees) {
+    $object = [PSCustomObject]@{ /* properties */ }
+    $null = $employeeData.Add($object)
+}
+$employeeData | Export-Csv -Path "C:\Reports\EmployeeData.csv" -NoTypeInformation
