@@ -1,0 +1,26 @@
+# Initialize an empty array
+$employeeData = @()
+
+# Sample data source (e.g., replace with Get-AzureADUser or other queries)
+$employees = @(
+    @{ Name = "Alice Johnson"; Department = "IT"; HireDate = "2023-01-15" },
+    @{ Name = "Bob Smith"; Department = "Finance"; HireDate = "2022-06-01" },
+    @{ Name = "Charlie Davis"; Department = "HR"; HireDate = "2024-03-20" }
+)
+
+# Loop through the data and create PSCustomObjects
+foreach ($emp in $employees) {
+    $object = [PSCustomObject]@{
+        FullName   = $emp.Name
+        Dept       = $emp.Department
+        HireDate   = [DateTime]$emp.HireDate  # Cast to DateTime for proper formatting
+        Status     = "Active"  # Example computed property
+    }
+    $employeeData += $object  # Add to the array (use ArrayList for large datasets)
+}
+
+# Export the array to a CSV file
+$employeeData | Export-Csv -Path "C:\Reports\EmployeeData.csv" -NoTypeInformation -Encoding UTF8
+
+# If you want to include type info or use a different delimiter (e.g., semicolon for some regions)
+# $employeeData | Export-Csv -Path "C:\Reports\EmployeeData.csv" -Delimiter ';' -Encoding UTF8
