@@ -37,3 +37,10 @@ foreach ($emp in $employees) {
     $null = $employeeData.Add($object)
 }
 $employeeData | Export-Csv -Path "C:\Reports\EmployeeData.csv" -NoTypeInformation
+
+
+
+  # Generic catch for other errors
+    Write-Error "Unexpected error: $($_.Exception.GetType().FullName) - $($_.Exception.Message). Stack trace: $($_.Exception.StackTrace)"
+    # Log to file for auditing
+    Add-Content -Path "C:\Logs\ScriptErrors.log" -Value "$(Get-Date): $($_.Exception.Message)"
