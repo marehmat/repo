@@ -45,7 +45,10 @@ try {
 } catch {}
 
 # 3) Get all site collections
-$allSites = Invoke-WithRetry { Get-PnPTenantSite -Connection $adminConn -IncludeOneDriveSites:$false -Filter "Template ne 'SRCHCEN#0'" } # exclude classic search center noisily
+$sites = @()
+$batch = Get-PnPTenantSite -Connection $adminConn -IncludeOneDriveSites:$false -Detailed
+$sites += $batch
+$allSites = $sites | Where-Object { $_.Template -ne 'SRCHCEN#0' }
 
 # 4) Collect apps from Tenant app catalog (published/available centrally)
 $results = New-Object System.Collections.Concurrent.ConcurrentBag[PSObject]
