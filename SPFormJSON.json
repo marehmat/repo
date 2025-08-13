@@ -14,7 +14,7 @@
         "Facility",
         {
           "field": "MoveFroward1",
-          "description": "=if([$MoveFroward1] == 'Yes', 'Yes: This will move the request to the next approval step and into processing.', if([$MoveFroward1] == 'No', 'No: The request will be reviewed but will not proceed.', if([$MoveFroward1] == 'Maybe', 'Maybe: The request requires clarification before continuing.', 'Select Yes, No, or Maybe.')))"
+          "description": "Yes: This will move the request to the next approval step and into processing.\nNo: The request will be reviewed but will not proceed.\nMaybe: The request requires clarification before continuing."
         }
       ]
     }
