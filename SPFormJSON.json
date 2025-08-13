@@ -1,29 +1,23 @@
 {
+  "attachments": {
+    "visible": false
+  },
   "sections": [
     {
       "displayname": "Request Summary",
       "fields": [
-        {
-          "field": "Title"
-        },
-        {
-          "field": "URL"
-        }
+        "Title",
+        "URL"
       ]
     },
     {
       "displayname": "Request Details",
       "fields": [
-        {
-          "field": "NewDetails"
-        },
-        {
-          "field": "Facility"
-        },
+        "NewDetails",
+        "Facility",
         {
           "field": "MoveForward",
-          "controlType": "toggle",
-          "description": "=if([$MoveForward] == true, 'Selecting Yes means the request will move to the next approval step and be processed shortly.', 'Selecting No means the request will be reviewed but will not proceed to the next stage.')"
+          "description": "=if([$MoveForward] == 'Yes', 'Yes: This will move the request to the next approval step and processing.', if([$MoveForward] == 'No', 'No: The request will be reviewed but will not proceed.', if([$MoveForward] == 'Maybe', 'Maybe: The request will require further clarification before continuing.', '')))
         }
       ]
     }
