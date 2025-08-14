@@ -1,3 +1,190 @@
+# Path to your SQLite DB
+$db = "C:\Data\POC\migration.db"
+
+# Create table with common SharePoint site collection fields
+sqlite3 "$db" @"
+CREATE TABLE IF NOT EXISTS SiteCollections (
+  SCId TEXT PRIMARY KEY,              -- GroupId/SiteId if available, else GUID
+  Url TEXT UNIQUE,                    -- https://contoso.sharepoint.com/sites/...
+  Template TEXT,                      -- e.g., GROUP#0, SITEPAGEPUBLISHING#0
+  OwnerUpn TEXT,                      -- Primary site collection admin
+  StorageMB INTEGER,                  -- Storage usage (rounded MB)
+  StorageQuotaMB INTEGER,             -- Quota MB (if available)
+  IsHub INTEGER,                      -- 0/1
+  HubId TEXT,                         -- HubSiteId
+  CreatedUtc TEXT,                    -- ISO 8601
+  LastContentModifiedUtc TEXT,        -- if available
+  LockState TEXT,                     -- Unlock, ReadOnly, NoAccess
+  SharingCapability TEXT,             -- Disabled, ExternalUserSharingOnly, etc.
+  SensitivityLabel TEXT,              -- if available via PnP
+  Status TEXT,                        -- general status field
+  RunId TEXT                          -- lineage
+);
+CREATE INDEX IF NOT EXISTS ix_SiteCollections_Url ON SiteCollections(Url);
+CREATE INDEX IF NOT EXISTS ix_SiteCollections_RunId ON SiteCollections(RunId);
+"@
+
+
+
+
+param(
+  [Parameter(Mandatory=$true)]
+  [string]$AdminUrl, # e.g. https://contoso-admin.sharepoint.com
+  [string]$DbPath = "C:\Data\POC\migration.db"
+)
+
+$ErrorActionPreference = "Stop"
+
+# Load System.Data.SQLite provider (portable DLL must be present as set up earlier)
+Add-Type -Path "C:\Tools\SQLite\lib\System.Data.SQLite.dll"
+
+# Open SQLite connection
+$conn = New-Object System.Data.SQLite.SQLiteConnection ("Data Source=$DbPath;Version=3;")
+$conn.Open()
+
+# Ensure WAL for better concurrency on server
+$pragma = $conn.CreateCommand()
+$pragma.CommandText = "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;"
+[void]$pragma.ExecuteNonQuery()
+
+# Unique index on Url
+$idx = $conn.CreateCommand()
+$idx.CommandText = "CREATE UNIQUE INDEX IF NOT EXISTS ux_SiteCollections_Url ON SiteCollections(Url);"
+[void]$idx.ExecuteNonQuery()
+
+# Connect to tenant and fetch site collections
+Connect-PnPOnline -Url $AdminUrl -Interactive   # PnP.PowerShell required[1][3]
+$sites = Get-PnPTenantSite -Limit All           # Enumerate all site collections[1][3]
+
+# Begin transaction
+$tx = $conn.BeginTransaction()
+try {
+  $runId = [guid]::NewGuid().ToString()
+  $now = [DateTime]::UtcNow.ToString("o")
+
+  # Record run
+  $run = $conn.CreateCommand()
+  $run.Transaction = $tx
+  $run.CommandText = "INSERT INTO SiteCollections(SCId, Url, Template, OwnerUpn, StorageMB, StorageQuotaMB, IsHub, HubId, CreatedUtc, LastContentModifiedUtc, LockState, SharingCapability, SensitivityLabel, Status, RunId) VALUES (@SCId,'RUN-PLACEHOLDER',NULL,NULL,NULL,NULL,NULL,NULL,@CreatedUtc,NULL,NULL,NULL,NULL,'RunMarker',@RunId);"
+  [void]$run.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@RunId",$runId)))
+  [void]$run.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@CreatedUtc",$now)))
+  [void]$run.ExecuteNonQuery()
+  # Above inserts a harmless placeholder row to preserve lineage in simple setups; optional for POC.
+
+  # Upsert command
+  $up = $conn.CreateCommand()
+  $up.Transaction = $tx
+  $up.CommandText = @"
+INSERT INTO SiteCollections
+  (SCId, Url, Template, OwnerUpn, StorageMB, StorageQuotaMB, IsHub, HubId, CreatedUtc, LastContentModifiedUtc, LockState, SharingCapability, SensitivityLabel, Status, RunId)
+VALUES
+  (@SCId, @Url, @Template, @OwnerUpn, @StorageMB, @StorageQuotaMB, @IsHub, @HubId, @CreatedUtc, @LastContentModifiedUtc, @LockState, @SharingCapability, @SensitivityLabel, @Status, @RunId)
+ON CONFLICT(Url) DO UPDATE SET
+  Template=excluded.Template,
+  OwnerUpn=excluded.OwnerUpn,
+  StorageMB=excluded.StorageMB,
+  StorageQuotaMB=excluded.StorageQuotaMB,
+  IsHub=excluded.IsHub,
+  HubId=excluded.HubId,
+  CreatedUtc=excluded.CreatedUtc,
+  LastContentModifiedUtc=excluded.LastContentModifiedUtc,
+  LockState=excluded.LockState,
+  SharingCapability=excluded.SharingCapability,
+  SensitivityLabel=excluded.SensitivityLabel,
+  Status=excluded.Status,
+  RunId=excluded.RunId;
+"@
+
+  foreach ($s in $sites) {
+    $up.Parameters.Clear()
+
+    # Map PnP fields defensively; some props can be $null depending on tenant/permissions
+    $scId   = if ($s.GroupId) { $s.GroupId.ToString() } elseif ($s.SiteId) { $s.SiteId.ToString() } else { [guid]::NewGuid().ToString() }
+    $url    = ($s.Url).ToLower().TrimEnd('/')
+    $tmpl   = $s.Template
+    $owner  = $s.Owner
+    # StorageUsageCurrent is reported in MB by SPO/PnP; keep as integer MB for the POC
+    $storMB = [int]($s.StorageUsageCurrent)
+    $quota  = if ($s.StorageQuota) { [int]$s.StorageQuota } else { $null }
+    $isHub  = [int]([bool]$s.IsHubSite)
+    $hubId  = if ($s.HubSiteId) { $s.HubSiteId.ToString() } else { $null }
+    $created= if ($s.CreationTime) { ([DateTime]$s.CreationTime).ToString("o") } else { $null }
+    $last   = if ($s.LastContentModifiedDate) { ([DateTime]$s.LastContentModifiedDate).ToString("o") } else { $null }
+    $lock   = $s.LockState
+    $share  = $s.SharingCapability
+    $label  = $s.SensitivityLabel
+    $status = $s.Status
+
+    [void]$up.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@SCId",$scId)))
+    [void]$up.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@Url",$url)))
+    [void]$up.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@Template",$tmpl)))
+    [void]$up.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@OwnerUpn",$owner)))
+    [void]$up.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@StorageMB",$storMB)))
+    [void]$up.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@StorageQuotaMB",$quota)))
+    [void]$up.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@IsHub",$isHub)))
+    [void]$up.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@HubId",$hubId)))
+    [void]$up.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@CreatedUtc",$created)))
+    [void]$up.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@LastContentModifiedUtc",$last)))
+    [void]$up.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@LockState",$lock)))
+    [void]$up.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@SharingCapability",$share)))
+    [void]$up.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@SensitivityLabel",$label)))
+    [void]$up.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@Status",$status)))
+    [void]$up.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@RunId",$runId)))
+
+    [void]$up.ExecuteNonQuery()
+  }
+
+  $tx.Commit()
+  Write-Host "Imported $($sites.Count) site collections into $DbPath. RunId=$runId"
+}
+catch {
+  $tx.Rollback()
+  throw
+}
+finally {
+  $conn.Close()
+}
+
+
+
+
+
+
+
+
+
+PowerShell.exe -ExecutionPolicy Bypass -File "C:\Data\POC\import-sites-pnp.ps1" -AdminUrl "https://contoso-admin.sharepoint.com" -DbPath "C:\Data\POC\migration.db"
+
+sqlite3 "C:\Data\POC\migration.db" "SELECT Url, Template, OwnerUpn, StorageMB, IsHub, LockState FROM SiteCollections ORDER BY Url LIMIT 10;"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # Initialize an empty array
 $employeeData = @()
 
