@@ -268,3 +268,117 @@ To preview without making changes:
 
 .\Mimic-SPOPerms.ps1 -AdminUrl https://contoso-admin.sharepoint.com -SiteUrl https://contoso.sharepoint.com/sites/TeamA -SourceUPN alice@contoso.com -TargetUPN bob@contoso.com -LogPath C:\Temp\log.csv -WhatIf
 #>
+
+
+Version 2
+
+
+$AdminUrl = "https://contoso-admin.sharepoint.com"
+$GroupId  = $null   # or [Guid]"00000000-0000-0000-0000-000000000000"
+$SiteUrl  = "https://contoso.sharepoint.com/sites/TeamA"
+$SourceUPN = "alice@contoso.com"
+$TargetUPN = "bob@contoso.com"
+$LogPath   = "C:\Temp\MimicPerms_log.csv"
+$WhatIf    = $false  # set $true to preview only
+
+
+function Write-ChangeLog {
+  param([string]$Scope,[string]$Action,[string]$ObjectId,[string]$Role,[string]$Details)
+  [pscustomobject]@{
+    TimeUtc   = (Get-Date).ToUniversalTime().ToString("s")
+    Scope     = $Scope
+    Action    = $Action
+    Object    = $ObjectId
+    Role      = $Role
+    SourceUPN = $SourceUPN
+    TargetUPN = $TargetUPN
+    Details   = $Details
+  } | Export-Csv -Path $LogPath -Append -NoTypeInformation -Force -Encoding UTF8
+}
+
+function Ensure-Module { param([string]$Name,[string]$MinVersion)
+  if(-not (Get-Module -ListAvailable -Name $Name)){ Install-Module $Name -MinimumVersion $MinVersion -Scope CurrentUser -Force }
+  Import-Module $Name -MinimumVersion $MinVersion -ErrorAction Stop
+}
+
+try {
+  Ensure-Module -Name Microsoft.Online.SharePoint.PowerShell -MinVersion "16.0.23512.12000"
+  Ensure-Module -Name PnP.PowerShell -MinVersion "1.9.0"
+
+  Connect-SPOService -Url $AdminUrl
+
+  if(-not $SiteUrl -and $GroupId){
+    $SiteUrl = (Get-SPOSite -Limit All -Detailed | Where-Object { $_.GroupId -eq $GroupId } | Select-Object -First 1).Url
+    if(-not $SiteUrl){ throw "No site found bound to GroupId $GroupId" }
+  }
+  if(-not $SiteUrl){ throw "Provide SiteUrl or GroupId." }
+
+  Connect-PnPOnline -Url $SiteUrl -Interactive
+
+  # 1) SharePoint groups: mirror membership
+  $spGroups = Get-SPOSiteGroup -Site $SiteUrl
+  foreach($g in $spGroups){
+    $inGroup = $false
+    try {
+      $inGroup = [bool](Get-PnPGroupMember -Group $g.Title -User $SourceUPN -ErrorAction SilentlyContinue)
+    } catch {}
+    if($inGroup){
+      Write-ChangeLog -Scope "SPGroup" -Action "AddGroupMember" -ObjectId $g.Title -Role "GroupMember" -Details "Add target where source is member"
+      if(-not $WhatIf){
+        Add-SPOUser -Site $SiteUrl -LoginName $TargetUPN -Group $g.Title -ErrorAction SilentlyContinue | Out-Null
+      }
+    }
+  }
+
+  # 2) Site-level direct role assignments
+  $web = Get-PnPWeb -Includes RoleAssignments
+  foreach($ra in $web.RoleAssignments){
+    $props = Get-PnPProperty -ClientObject $ra -Property Member, RoleDefinitionBindings
+    if($props.Member.PrincipalType -eq "User" -and $props.Member.LoginName -like "*|$SourceUPN"){
+      $roles = $props.RoleDefinitionBindings | ForEach-Object { $_.Name }
+      if($roles.Count -gt 0){
+        Write-ChangeLog -Scope "Web" -Action "AddRole" -ObjectId $SiteUrl -Role ($roles -join ";") -Details "Copy direct web roles"
+        if(-not $WhatIf){ foreach($r in $roles){ Set-PnPWebPermission -User $TargetUPN -AddRole $r | Out-Null } }
+      }
+    }
+  }
+
+  # 3) Document libraries with unique permissions
+  $lists = Get-PnPList -Includes Title, BaseType, Hidden, HasUniqueRoleAssignments, RoleAssignments
+  $docLibs = $lists | Where-Object { $_.BaseType -eq "DocumentLibrary" -and -not $_.Hidden -and $_.HasUniqueRoleAssignments }
+  foreach($list in $docLibs){
+    $las = Get-PnPProperty -ClientObject $list -Property RoleAssignments
+    foreach($ra in $las){
+      $p = Get-PnPProperty -ClientObject $ra -Property Member, RoleDefinitionBindings
+      $roles = $p.RoleDefinitionBindings | ForEach-Object { $_.Name }
+
+      # Direct user at list level
+      if($p.Member.PrincipalType -eq "User" -and $p.Member.LoginName -like "*|$SourceUPN"){
+        Write-ChangeLog -Scope "List" -Action "AddRole" -ObjectId $list.Title -Role ($roles -join ";") -Details "Copy list roles"
+        if(-not $WhatIf){ foreach($r in $roles){ Set-PnPListPermission -Identity $list.Title -User $TargetUPN -AddRole $r | Out-Null } }
+      }
+
+      # Access via SP group at list level
+      if($p.Member.PrincipalType -eq "SharePointGroup"){
+        $isMember = Get-PnPGroupMember -Group $p.Member.Title -User $SourceUPN -ErrorAction SilentlyContinue
+        if($isMember){
+          Write-ChangeLog -Scope "List" -Action "AddGroupMember" -ObjectId $p.Member.Title -Role "GroupMember" -Details "Ensure target in list-permission group"
+          if(-not $WhatIf){ Add-SPOUser -Site $SiteUrl -LoginName $TargetUPN -Group $p.Member.Title -ErrorAction SilentlyContinue | Out-Null }
+        }
+      }
+    }
+  }
+
+  Write-Host "Done. Review log at $LogPath" -ForegroundColor Green
+}
+catch {
+  Write-Error $_.Exception.Message
+  throw
+}
+
+
+
+
+
+
+
